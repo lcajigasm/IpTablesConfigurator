@@ -2,13 +2,25 @@
 
 interfaz()
 {
-	ifconfig | egrep eth | cut -c1-5 2>/dev/null	
+	ip link show | grep -E "eth|ens|enp" | awk -F: '{print $2}' | tr -d ' ' 2>/dev/null	
 }
 servicios()
 {
-	service mysqld status 2>/dev/null
-	service keepalived status 2>/dev/null
-	service httpd status 2>/dev/null
+	systemctl is-active mysqld mysql mariadb 2>/dev/null | head -1
+	systemctl is-active keepalived 2>/dev/null
+	systemctl is-active httpd apache2 2>/dev/null | head -1
+}
+
+save_and_restart_iptables()
+{
+	# Save iptables rules (supports both systemd and legacy systems)
+	if command -v iptables-save >/dev/null && command -v systemctl >/dev/null; then
+		iptables-save > /etc/iptables/rules.v4 2>/dev/null || iptables-save > /etc/sysconfig/iptables 2>/dev/null
+		systemctl restart iptables 2>/dev/null || systemctl restart netfilter-persistent 2>/dev/null
+	else
+		/sbin/service iptables save 2>/dev/null
+		service iptables restart >/dev/null 2>&1
+	fi
 }
 
 restart_firewall()
@@ -23,8 +35,7 @@ restart_firewall()
 	iptables -P FORWARD ACCEPT
 	iptables -t nat -P PREROUTING ACCEPT
 	iptables -t nat -P POSTROUTING ACCEPT
-	/sbin/service iptables save
-	service iptables restart >/dev/null
+	save_and_restart_iptables
 }
 
 open_apache()
@@ -39,8 +50,7 @@ open_apache()
 
 	iptables -A INPUT -p tcp -i $interface --dport 8080 -j ACCEPT
 	iptables -A OUTPUT -p tcp -o $interface --dport 8080 -j ACCEPT
-	/sbin/service iptables save
-	service iptables restart >/dev/null
+	save_and_restart_iptables
 }
 
 open_mysql()
@@ -48,8 +58,7 @@ open_mysql()
 	change_interface
 	iptables -A INPUT -p tcp -i $interface --dport 3306 -j ACCEPT
 	iptables -A OUTPUT -p tcp -o $interface --dport 3306 -j ACCEPT
-	/sbin/service iptables save
-	service iptables restart >/dev/null
+	save_and_restart_iptables
 }
 
 open_drbd()
@@ -57,8 +66,7 @@ open_drbd()
 	change_interface	
 	iptables -A INPUT -p tcp -i $interface --dport 7788 -j ACCEPT
 	iptables -A OUTPUT -p tcp -o $interface --dport 7788 -j ACCEPT
-	/sbin/service iptables save
-	service iptables restart >/dev/null
+	save_and_restart_iptables
 }
 
 open_keepalived()
@@ -66,8 +74,7 @@ open_keepalived()
 	change_interface
 	iptables -p vrrp -i $interface -A INPUT -j ACCEPT
     	iptables -p vrrp -o $interface -A OUTPUT -j ACCEPT
-	/sbin/service iptables save
-	service iptables restart >/dev/null
+	save_and_restart_iptables
 }
 
 open_ssh()
@@ -75,8 +82,7 @@ open_ssh()
 	change_interface
 	iptables -A INPUT -p tcp -i $interface --dport 22 -j ACCEPT
 	iptables -A OUTPUT -p tcp -o $interface --dport 22 -j ACCEPT
-	/sbin/service iptables save
-	service iptables restart >/dev/null
+	save_and_restart_iptables
 }
 
 open_custom()
@@ -113,8 +119,7 @@ open_custom()
 	*)echo "OPC no válida";;
 	esac
 	
-	/sbin/service iptables save
-	service iptables restart >/dev/null		
+	save_and_restart_iptables		
 }
 
 iptables_menu()
@@ -159,8 +164,7 @@ iptables_delete()
 	echo "¿Qué linea deseas borrar?"
 	read lin_del
 	iptables -D INPUT $lin_del
-	/sbin/service iptables save
-	service iptables restart >/dev/null
+	save_and_restart_iptables
 }
 
 file_gestion()
@@ -169,10 +173,26 @@ file_gestion()
 	echo "[2]Restaurar conf. iptables"
 	read fresp;
 	case $fresp in
-	1) cp /etc/sysconfig/iptables /etc/sysconfig/iptables.bak;;
-	2) cp /etc/sysconfig/iptables.bak /etc/sysconfig/iptables 2>/dev/null
-	   if [ $? -ne 0 ];
-	   then
+	1) # Backup iptables configuration
+	   if [ -f /etc/iptables/rules.v4 ]; then
+		cp /etc/iptables/rules.v4 /etc/iptables/rules.v4.bak
+	   elif [ -f /etc/sysconfig/iptables ]; then
+		cp /etc/sysconfig/iptables /etc/sysconfig/iptables.bak
+	   else
+		echo "No se encontró archivo de configuración de iptables"
+	   fi;;
+	2) # Restore iptables configuration
+	   if [ -f /etc/iptables/rules.v4.bak ]; then
+		cp /etc/iptables/rules.v4.bak /etc/iptables/rules.v4 2>/dev/null
+		if [ $? -ne 0 ]; then
+			echo "Error al restaurar el fichero"
+		fi
+	   elif [ -f /etc/sysconfig/iptables.bak ]; then
+		cp /etc/sysconfig/iptables.bak /etc/sysconfig/iptables 2>/dev/null
+		if [ $? -ne 0 ]; then
+			echo "Error al restaurar el fichero"
+		fi
+	   else
 		echo "Error al copiar el fichero"
 		echo "¿Habías realizado una copia previamente?"
 	   fi;;
@@ -266,10 +286,10 @@ do
         	interfaz
 		read -p "Presiona [Enter] para continuar...";;
     	2) 
-        	rm -f /etc/udev/rules.d/70-persistent-net.rules 2>/dev/null
+        	rm -f /etc/udev/rules.d/70-persistent-net.rules /lib/udev/rules.d/75-persistent-net-generator.rules 2>/dev/null
 		read -p "Presiona [Enter] para continuar...";;
 	3)
-		ifconfig -a
+		ip addr show
 		read -p "Presiona [Enter] para continuar...";;	
 	4)
 		servicios
